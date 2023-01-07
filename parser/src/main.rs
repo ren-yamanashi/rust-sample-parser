@@ -29,7 +29,7 @@ impl<T> Annot<T> {
  * トークンはトークンの種類に位置情報を加えたもの
  */
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum TokenKind {
+pub enum TokenKind {
     // [0-9][0-9]*
     Number(u64),
     // +
@@ -46,7 +46,7 @@ enum TokenKind {
     RParen,
 }
 
-type Token = Annot<TokenKind>;
+pub type Token = Annot<TokenKind>;
 
 // 関連関数を定義
 impl Token {
@@ -78,7 +78,7 @@ impl Token {
  * エラーの定義
  */
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum LexErrorKind {
+pub enum LexErrorKind {
     InvalidChar(char),
     Eof,
 }
@@ -237,8 +237,325 @@ fn test_lexer() {
     )
 }
 
-use std::io;
+// 単項演算子を表すデータ型
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum UniOpKind {
+    Plus,
+    Minus,
+}
+type UniOp = Annot<UniOpKind>;
+impl UniOp {
+    fn plus(loc: Loc) -> Self {
+        Self::new(UniOpKind::Plus, loc)
+    }
+    fn minus(loc: Loc) -> Self {
+        Self::new(UniOpKind::Minus, loc)
+    }
+}
 
+// 二項演算子を表すデータ型
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum BinOpKind {
+    Add,
+    Sub,
+    Mult,
+    Div,
+}
+type BinOp = Annot<BinOpKind>;
+impl BinOp {
+    fn add(loc: Loc) -> Self {
+        Self::new(BinOpKind::Add, loc)
+    }
+    fn sub(loc: Loc) -> Self {
+        Self::new(BinOpKind::Sub, loc)
+    }
+    fn mult(loc: Loc) -> Self {
+        Self::new(BinOpKind::Mult, loc)
+    }
+    fn div(loc: Loc) -> Self {
+        Self::new(BinOpKind::Div, loc)
+    }
+}
+
+// ASTを表すデータ型
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum AstKind {
+    Num(u64),
+    // 単項演算
+    UniOp { op: UniOp, e: Box<Ast> },
+    // 二項演算
+    BinOp { op: BinOp, l: Box<Ast>, r: Box<Ast> },
+}
+
+type Ast = Annot<AstKind>;
+impl Ast {
+    fn num(n: u64, loc: Loc) -> Self {
+        // impl<T> Annot<T>で実装したnewを呼ぶ
+        Self::new(AstKind::Num(n), loc)
+    }
+
+    fn uniop(op: UniOp, e: Ast, loc: Loc) -> Self {
+        Self::new(AstKind::UniOp { op, e: Box::new(e) }, loc)
+    }
+
+    fn binop(op: BinOp, l: Ast, r: Ast, loc: Loc) -> Self {
+        Self::new(
+            AstKind::BinOp {
+                op,
+                l: Box::new(l),
+                r: Box::new(r),
+            },
+            loc,
+        )
+    }
+}
+
+// エラーを表すデータ型
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ParseError {
+    // 予期しないトークンがきた場合
+    UnexpectedToken(Token),
+
+    /** 期待していないものが来た場合 */
+    // 式を期待していた場合
+    NotExpression(Token),
+    // 演算子を期待していた場合
+    NotOperator(Token),
+
+    // 括弧が閉じられていない場合
+    UnclosedOpenParen(Token),
+
+    // 式の解析が終わったのにトークンが残っている
+    RedundantExpression(Token),
+
+    // パース途中で入力が終わった
+    Eof,
+}
+
+/**
+ * 構文解析器の実装
+ * EXPR = EXPR3
+ * EXPR3 = EXPR3, ("+" | "-"), EXPR2 | EXPR2;
+ * EXPR2 = EXPR2, ("*" | "/"), EXPR1 | EXPR1;
+ * EXPR1 = ("+" | "-"), ATOM | ATOM;
+ * ATOM = UNUMBER | "(" , EXPR3, ")";
+ * UNUMBER = DIGIT, {DIGIT};
+ * DIGIT = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7"  | "8" | "9";
+ */
+use std::iter::Peekable;
+fn parse(tokens: Vec<Token>) -> Result<Ast, ParseError> {
+    // イテレータにして、次の値を覗き見可能にする(peekable)
+    let mut tokens = tokens.into_iter().peekable();
+
+    // parse_exprを読んでエラー処理
+    let ret = parse_expr(&mut tokens)?;
+    match tokens.next() {
+        Some(tok) => Err(ParseError::RedundantExpression(tok)),
+        None => Ok(ret),
+    }
+}
+
+// parse_expr3とparse_expr2内で呼び出すを共通化
+fn parse_left_binop<Tokens>(
+    tokens: &mut Peekable<Tokens>,
+    subexpr_parser: fn(&mut Peekable<Tokens>) -> Result<Ast, ParseError>,
+    op_parser: fn(&mut Peekable<Tokens>) -> Result<BinOp, ParseError>,
+) -> Result<Ast, ParseError>
+where
+    Tokens: Iterator<Item = Token>,
+{
+    let mut e = subexpr_parser(tokens)?;
+    loop {
+        match tokens.peek() {
+            Some(_) => {
+                let op = match op_parser(tokens) {
+                    Ok(op) => op,
+                    // ここでパースに失敗したのはこれ以上中置演算子がないという意味
+                    Err(_) => break,
+                };
+                let r = subexpr_parser(tokens)?;
+                let loc = e.loc.merge(&r.loc);
+                e = Ast::binop(op, e, r, loc)
+            }
+            _ => break,
+        }
+    }
+    Ok(e)
+}
+
+// EXPRの実装
+fn parse_expr<Tokens>(tokens: &mut Peekable<Tokens>) -> Result<Ast, ParseError>
+where
+    Tokens: Iterator<Item = Token>,
+{
+    // parse_exprはparse_expr3を呼ぶだけ
+    parse_expr3(tokens)
+}
+
+// EXPR3の実装
+fn parse_expr3<Tokens>(tokens: &mut Peekable<Tokens>) -> Result<Ast, ParseError>
+where
+    Tokens: Iterator<Item = Token>,
+{
+    // EXPR2をパース
+    let mut e = parse_expr2(tokens)?;
+    // EXPR3_Loop
+    loop {
+        match tokens.peek().map(|tok| tok.value) {
+            // `("+" | "-")`である事の確認
+            Some(TokenKind::Plus) | Some(TokenKind::Minus) => {
+                let op = match tokens.next().unwrap() {
+                    Token {
+                        value: TokenKind::Plus,
+                        loc,
+                    } => BinOp::add(loc),
+                    Token {
+                        value: TokenKind::Minus,
+                        loc,
+                    } => BinOp::sub(loc),
+                    // `("+" | "-")`である事の確認をしたのでそれ以外な存在しない
+                    _ => unreachable!(),
+                };
+                // EXPR2をパース
+                let r = parse_expr2(tokens)?;
+                let loc = e.loc.merge(&r.loc);
+                e = Ast::binop(op, e, r, loc);
+            }
+            _ => return Ok(e),
+        }
+    }
+}
+
+// EXPR2の実装
+fn parse_expr2<Tokens>(tokens: &mut Peekable<Tokens>) -> Result<Ast, ParseError>
+where
+    Tokens: Iterator<Item = Token>,
+{
+    // EXPR1をパース
+    let mut e = parse_expr1(tokens)?;
+    // EXPR2
+    loop {
+        match tokens.peek().map(|tok| tok.value) {
+            // `("*" | "/")`である事の確認
+            Some(TokenKind::Asterisk) | Some(TokenKind::Slash) => {
+                let op = match tokens.next().unwrap() {
+                    Token {
+                        value: TokenKind::Asterisk,
+                        loc,
+                    } => BinOp::mult(loc),
+                    Token {
+                        value: TokenKind::Slash,
+                        loc,
+                    } => BinOp::div(loc),
+                    // `("*" | "/")`である事の確認をしたのでそれ以外な存在しない
+                    _ => unreachable!(),
+                };
+                // EXPR1をパース
+                let r = parse_expr1(tokens)?;
+                let loc = e.loc.merge(&r.loc);
+                e = Ast::binop(op, e, r, loc);
+            }
+            _ => return Ok(e),
+        }
+    }
+}
+
+// EXPR1の実装
+fn parse_expr1<Tokens>(tokens: &mut Peekable<Tokens>) -> Result<Ast, ParseError>
+where
+    Tokens: Iterator<Item = Token>,
+{
+    match tokens.peek().map(|tok| tok.value) {
+        Some(TokenKind::Plus) | Some(TokenKind::Minus) => {
+            // `("+" | "-")`
+            let op = match tokens.next() {
+                Some(Token {
+                    value: TokenKind::Plus,
+                    loc,
+                }) => UniOp::plus(loc),
+                Some(Token {
+                    value: TokenKind::Minus,
+                    loc,
+                }) => UniOp::minus(loc),
+                _ => unreachable!(),
+            };
+             // ATOM
+            let e = parse_atom(tokens)?;
+            let loc = op.loc.merge(&e.loc);
+            Ok(Ast::uniop(op, e, loc))
+        }
+        // `| ATOM`
+        _ => parse_atom(tokens),
+    }
+}
+
+// ATOMの実装
+fn parse_atom<Tokens>(tokens: &mut Peekable<Tokens>) -> Result<Ast, ParseError>
+where
+    Tokens: Iterator<Item = Token>,
+{
+    tokens
+        .next()
+        .ok_or(ParseError::Eof)
+        .and_then(|tok| match tok.value {
+            // UNUMBER
+            TokenKind::Number(n) => Ok(Ast::new(AstKind::Num(n), tok.loc)),
+
+            // "(", EXPR3, ")"
+            TokenKind::LParen => {
+                let e = parse_expr(tokens)?;
+                match tokens.next() {
+                    Some(Token {
+                        value: TokenKind::RParen,
+                        ..
+                    }) => Ok(e),
+                    Some(t) => Err(ParseError::RedundantExpression(t)),
+                    _ => Err(ParseError::UnclosedOpenParen(tok)),
+                }
+            }
+            _ => Err(ParseError::NotExpression(tok)),
+        })
+}
+
+#[test]
+fn test_parser() {
+    // 1 + 2 * 3 - -10
+    let ast = parse(vec![
+        Token::number(1, Loc(0, 1)),
+        Token::plus(Loc(2, 3)),
+        Token::number(2, Loc(4, 5)),
+        Token::asterisk(Loc(6, 7)),
+        Token::number(3, Loc(8, 9)),
+        Token::minus(Loc(10, 11)),
+        Token::minus(Loc(12, 13)),
+        Token::number(10, Loc(13, 15)),
+    ]);
+    assert_eq!(
+        ast,
+        Ok(Ast::binop(
+            BinOp::sub(Loc(10, 11)),
+            Ast::binop(
+                BinOp::add(Loc(2, 3)),
+                Ast::num(1, Loc(0, 1)),
+                Ast::binop(
+                    BinOp::new(BinOpKind::Mult, Loc(6, 7)),
+                    Ast::num(2, Loc(4, 5)),
+                    Ast::num(3, Loc(8, 9)),
+                    Loc(4, 9)
+                ),
+                Loc(0, 9),
+            ),
+            Ast::uniop(
+                UniOp::minus(Loc(12, 13)),
+                Ast::num(10, Loc(13, 15)),
+                Loc(12, 15)
+            ),
+            Loc(0, 15)
+        ))
+    )
+}
+
+use std::io;
 // プロンプトを表示しユーザーの入力を促す
 fn prompt(s: &str) -> io::Result<()> {
     use std::io::{stdout, Write};
@@ -262,8 +579,10 @@ fn main() {
         // 入力値の取得
         if let Some(Ok(line)) = lines.next() {
             // 字句解析
-            let token = lex(&line);
-            println!("{:?}", token);
+            let tokens = lex(&line).unwrap();
+            // 構文解析
+            let ast = parse(tokens).unwrap();
+            println!("{:?}", ast);
         } else {
             break;
         }
