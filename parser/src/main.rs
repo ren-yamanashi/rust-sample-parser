@@ -46,7 +46,7 @@ pub enum TokenKind {
     RParen,
 }
 
-pub type Token = Annot<TokenKind>;
+type Token = Annot<TokenKind>;
 
 // 関連関数を定義
 impl Token {
@@ -71,25 +71,6 @@ impl Token {
     }
     fn rparen(loc: Loc) -> Self {
         Self::new(TokenKind::RParen, loc)
-    }
-}
-
-/**
- * エラーの定義
- */
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum LexErrorKind {
-    InvalidChar(char),
-    Eof,
-}
-
-type LexError = Annot<LexErrorKind>;
-impl LexError {
-    fn invalid_char(c: char, loc: Loc) -> Self {
-        LexError::new(LexErrorKind::InvalidChar(c), loc)
-    }
-    fn eof(loc: Loc) -> Self {
-        LexError::new(LexErrorKind::Eof, loc)
     }
 }
 
@@ -220,23 +201,6 @@ fn lex(input: &str) -> Result<Vec<Token>, LexError> {
     Ok(tokens)
 }
 
-#[test]
-fn test_lexer() {
-    assert_eq!(
-        lex("1 + 2 * 3 - -10"),
-        Ok(vec![
-            Token::number(1, Loc(0, 1)),
-            Token::plus(Loc(2, 3)),
-            Token::number(2, Loc(4, 5)),
-            Token::asterisk(Loc(6, 7)),
-            Token::number(3, Loc(8, 9)),
-            Token::minus(Loc(10, 11)),
-            Token::minus(Loc(12, 13)),
-            Token::number(10, Loc(13, 15)),
-        ])
-    )
-}
-
 // 単項演算子を表すデータ型
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum UniOpKind {
@@ -310,28 +274,6 @@ impl Ast {
     }
 }
 
-// エラーを表すデータ型
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum ParseError {
-    // 予期しないトークンがきた場合
-    UnexpectedToken(Token),
-
-    /** 期待していないものが来た場合 */
-    // 式を期待していた場合
-    NotExpression(Token),
-    // 演算子を期待していた場合
-    NotOperator(Token),
-
-    // 括弧が閉じられていない場合
-    UnclosedOpenParen(Token),
-
-    // 式の解析が終わったのにトークンが残っている
-    RedundantExpression(Token),
-
-    // パース途中で入力が終わった
-    Eof,
-}
-
 /**
  * 構文解析器の実装
  * EXPR = EXPR3
@@ -388,7 +330,6 @@ fn parse_expr<Tokens>(tokens: &mut Peekable<Tokens>) -> Result<Ast, ParseError>
 where
     Tokens: Iterator<Item = Token>,
 {
-    // parse_exprはparse_expr3を呼ぶだけ
     parse_expr3(tokens)
 }
 
@@ -517,6 +458,381 @@ where
         })
 }
 
+use std::str::FromStr;
+// AstにFromStrを実装すると`str::parse`が使える
+impl FromStr for Ast {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // 字句解析 -> 構文解析の順に実行する
+        let tokens = lex(s)?;
+        let ast = parse(tokens)?;
+        Ok(ast)
+    }
+}
+
+/**
+ * エラーの定義
+ */
+// lexer
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum LexErrorKind {
+    InvalidChar(char),
+    Eof,
+}
+
+type LexError = Annot<LexErrorKind>;
+impl LexError {
+    fn invalid_char(c: char, loc: Loc) -> Self {
+        LexError::new(LexErrorKind::InvalidChar(c), loc)
+    }
+    fn eof(loc: Loc) -> Self {
+        LexError::new(LexErrorKind::Eof, loc)
+    }
+}
+
+// perser
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ParseError {
+    // 予期しないトークンがきた場合
+    UnexpectedToken(Token),
+
+    /** 期待していないものが来た場合 */
+    // 式を期待していた場合
+    NotExpression(Token),
+    // 演算子を期待していた場合
+    NotOperator(Token),
+
+    // 括弧が閉じられていない場合
+    UnclosedOpenParen(Token),
+
+    // 式の解析が終わったのにトークンが残っている
+    RedundantExpression(Token),
+
+    // パース途中で入力が終わった
+    Eof,
+}
+
+// interpreter
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum InterpreterErrorKind {
+    DivisionByZero,
+}
+type InterpreterError = Annot<InterpreterErrorKind>;
+impl InterpreterError {
+    fn show_diagnostic(&self, input: &str) {
+        // エラー情報を簡単に表示し
+        eprintln!("{}", self);
+        // エラー位置を指示する
+        print_annot(input, self.loc.clone());
+    }
+}
+
+// 字句解析エラーと構文解析エラーを統合するエラー型
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Error {
+    Lexer(LexError),
+    Parser(ParseError),
+}
+
+impl From<LexError> for Error {
+    fn from(e: LexError) -> Self {
+        Error::Lexer(e)
+    }
+}
+
+impl From<ParseError> for Error {
+    fn from(e: ParseError) -> Self {
+        Error::Parser(e)
+    }
+}
+
+/**
+ * エラーハンドリング
+ */
+
+// 字句解析
+impl fmt::Display for LexError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::LexErrorKind::*;
+        let loc = &self.loc;
+        match self.value {
+            InvalidChar(c) => write!(f, "{}: invalid char '{}'", loc, c),
+            Eof => write!(f, "End of file"),
+        }
+    }
+}
+
+// 構文解析
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::ParseError::*;
+        match self {
+            UnexpectedToken(tok) => write!(f, "{}: {} is not expected", tok.loc, tok.value),
+            NotExpression(tok) => write!(
+                f,
+                "{}: '{}' is not a start of expression",
+                tok.loc, tok.value
+            ),
+            NotOperator(tok) => write!(f, "{}: '{}' is not an operator", tok.loc, tok.value),
+            UnclosedOpenParen(tok) => write!(f, "{}: '{}' is not closed", tok.loc, tok.value),
+            RedundantExpression(tok) => write!(
+                f,
+                "{}: expression after '{}' is redundant",
+                tok.loc, tok.value
+            ),
+            Eof => write!(f, "End of file"),
+        }
+    }
+}
+
+// インタプリタ
+impl fmt::Display for InterpreterError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::InterpreterErrorKind::*;
+        match self.value {
+            DivisionByZero => write!(f, "division by zero"),
+        }
+    }
+}
+
+/** DisplayとErrorをエラー関連の方に実装 */
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "parser error")
+    }
+}
+
+impl StdError for InterpreterError {
+    fn description(&self) -> &str {
+        use self::InterpreterErrorKind::*;
+        match self.value {
+            DivisionByZero => "the right hand expression of the division evaluates to zero",
+        }
+    }
+}
+
+// 標準ライブラリのErrorを実装(descriptionとcauseは使わず、sourceだけを実装)
+// Errorデータ型と名前が重複するのでStdErrorとして導入
+use std::error::Error as StdError;
+impl StdError for LexError {}
+impl StdError for ParseError {}
+impl StdError for Error {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        use self::Error::*;
+        match self {
+            Lexer(lex) => Some(lex),
+            Parser(parse) => Some(parse),
+        }
+    }
+}
+
+/**
+ * エラーの実装
+ */
+impl Error {
+    /// 診断メッセージを表示する
+    fn show_diagnostic(&self, input: &str) {
+        use self::Error::*;
+        use self::ParseError as P;
+        // エラー情報とその位置情報を取り出す
+        let (e, loc): (&dyn StdError, Loc) = match self {
+            Lexer(e) => (e, e.loc.clone()),
+            Parser(e) => {
+                let loc = match e {
+                    P::UnexpectedToken(Token { loc, .. })
+                    | P::NotExpression((Token { loc, .. }))
+                    | P::NotOperator((Token { loc, .. }))
+                    | P::UnclosedOpenParen((Token { loc, .. })) => loc.clone(),
+                    // redundant expressionはトークン移行行末までがあまりなのでlocの終了位置を調節
+                    P::RedundantExpression(Token { loc, .. }) => Loc(loc.0, input.len()),
+                    // Eofは位置情報を持っていないのでその場で作る
+                    P::Eof => Loc(input.len(), input.len() + 1),
+                };
+                (e, loc)
+            }
+        };
+        // エラー情報を表示
+        eprintln!("{}", e);
+        // エラー位置情報を強調して表示
+        print_annot(input, loc);
+    }
+}
+
+/**
+ *
+ */
+
+/** 文字の表示 */
+use std::fmt;
+impl fmt::Display for TokenKind {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::TokenKind::*;
+        match self {
+            Number(n) => n.fmt(f),
+            Plus => write!(f, "+"),
+            Minus => write!(f, "-"),
+            Asterisk => write!(f, "*"),
+            Slash => write!(f, "/"),
+            LParen => write!(f, "("),
+            RParen => write!(f, ")"),
+        }
+    }
+}
+
+/** 位置情報の表示 */
+impl fmt::Display for Loc {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}-{}", self.0, self.1)
+    }
+}
+fn print_annot(input: &str, loc: Loc) {
+    // 入力に対して位置情報をわかりやすく示す
+    eprintln!("{}", input);
+    eprintln!("{}{}", " ".repeat(loc.0), "^".repeat(loc.1 - loc.0));
+}
+
+/** エラー詳細表示 */
+fn show_trace<E: StdError>(e: E) {
+    // エラーがあった場合、そのエラーとsourceを全て出力
+    eprintln!("{}", e);
+    let mut source = e.source();
+
+    // sourceを全て辿って表示
+    while let Some(e) = source {
+        eprintln!("caused by {}", e);
+        source = e.source()
+    }
+}
+
+/**
+ * インタプリタの作成
+ */
+// データ型
+struct Interpreter;
+impl Interpreter {
+    pub fn new() -> Self {
+        Interpreter
+    }
+
+    pub fn eval(&mut self, expr: &Ast) -> Result<i64, InterpreterError> {
+        use self::AstKind::*;
+        match expr.value {
+            Num(n) => Ok(n as i64),
+            UniOp { ref op, ref e } => {
+                let e = self.eval(e)?;
+                Ok(self.eval_uniop(op, e))
+            }
+            BinOp {
+                ref op,
+                ref l,
+                ref r,
+            } => {
+                let l = self.eval(l)?;
+                let r = self.eval(r)?;
+                self.eval_binop(op, l, r)
+                    .map_err(|e| InterpreterError::new(e, expr.loc.clone()))
+            }
+        }
+    }
+    // 単項演算
+    fn eval_uniop(&mut self, op: &UniOp, n: i64) -> i64 {
+        use self::UniOpKind::*;
+        match op.value {
+            Plus => n,
+            Minus => -n,
+        }
+    }
+    // 二項演算
+    fn eval_binop(&mut self, op: &BinOp, l: i64, r: i64) -> Result<i64, InterpreterErrorKind> {
+        use self::BinOpKind::*;
+        match op.value {
+            Add => Ok(l + r),
+            Sub => Ok(l - r),
+            Mult => Ok(l * r),
+            Div => {
+                if r == 0 {
+                    Err(InterpreterErrorKind::DivisionByZero)
+                } else {
+                    Ok(l / r)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 入力の受付
+ */
+use std::io;
+// プロンプトを表示しユーザーの入力を促す
+fn prompt(s: &str) -> io::Result<()> {
+    use std::io::{stdout, Write};
+
+    let stdout = stdout();
+    let mut stdout = stdout.lock();
+    stdout.write(s.as_bytes());
+    stdout.flush()
+}
+
+fn main() {
+    use std::io::{stdin, BufRead, BufReader};
+
+    // インタプリタを用意
+    let mut interpreter = Interpreter::new();
+
+    let stdin = stdin();
+    let stdin = stdin.lock();
+    let stdin = BufReader::new(stdin);
+    let mut lines = stdin.lines();
+
+    loop {
+        prompt("> ").unwrap();
+        // 入力値の取得
+        if let Some(Ok(line)) = lines.next() {
+            let ast = match line.parse::<Ast>() {
+                Ok(ast) => ast,
+                Err(e) => {
+                    e.show_diagnostic(&line);
+                    show_trace(e);
+                    continue;
+                }
+            };
+            // インタプリタでevalする
+            let n = match interpreter.eval(&ast) {
+                Ok(n) => n,
+                Err(e) => {
+                    e.show_diagnostic(&line);
+                    show_trace(e);
+                    continue;
+                }
+            };
+            println!("{}", n);
+        } else {
+            break;
+        }
+    }
+}
+
+/**
+ * tests
+ */
+#[test]
+fn test_lexer() {
+    assert_eq!(
+        lex("1 + 2 * 3 - -10"),
+        Ok(vec![
+            Token::number(1, Loc(0, 1)),
+            Token::plus(Loc(2, 3)),
+            Token::number(2, Loc(4, 5)),
+            Token::asterisk(Loc(6, 7)),
+            Token::number(3, Loc(8, 9)),
+            Token::minus(Loc(10, 11)),
+            Token::minus(Loc(12, 13)),
+            Token::number(10, Loc(13, 15)),
+        ])
+    )
+}
+
 #[test]
 fn test_parser() {
     // 1 + 2 * 3 - -10
@@ -553,201 +869,4 @@ fn test_parser() {
             Loc(0, 15)
         ))
     )
-}
-
-// 字句解析エラーと構文解析エラーを統合するエラー型
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Error {
-    Lexer(LexError),
-    Parser(ParseError),
-}
-
-impl From<LexError> for Error {
-    fn from(e: LexError) -> Self {
-        Error::Lexer(e)
-    }
-}
-
-impl From<ParseError> for Error {
-    fn from(e: ParseError) -> Self {
-        Error::Parser(e)
-    }
-}
-
-/** 文字の表示 */
-use std::fmt;
-impl fmt::Display for TokenKind {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use self::TokenKind::*;
-        match self {
-            Number(n) => n.fmt(f),
-            Plus => write!(f, "+"),
-            Minus => write!(f, "-"),
-            Asterisk => write!(f, "*"),
-            Slash => write!(f, "/"),
-            LParen => write!(f, "("),
-            RParen => write!(f, ")"),
-        }
-    }
-}
-
-/** 位置情報の表示 */
-impl fmt::Display for Loc {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}-{}", self.0, self.1)
-    }
-}
-
-// 字句解析エラーハンドリング
-impl fmt::Display for LexError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use self::LexErrorKind::*;
-        let loc = &self.loc;
-        match self.value {
-            InvalidChar(c) => write!(f, "{}: invalid char '{}'", loc, c),
-            Eof => write!(f, "End of file"),
-        }
-    }
-}
-
-// 構文解析エラーハンドリング
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use self::ParseError::*;
-        match self {
-            UnexpectedToken(tok) => write!(f, "{}: {} is not expected", tok.loc, tok.value),
-            NotExpression(tok) => write!(
-                f,
-                "{}: '{}' is not a start of expression",
-                tok.loc, tok.value
-            ),
-            NotOperator(tok) => write!(f, "{}: '{}' is not an operator", tok.loc, tok.value),
-            UnclosedOpenParen(tok) => write!(f, "{}: '{}' is not closed", tok.loc, tok.value),
-            RedundantExpression(tok) => write!(
-                f,
-                "{}: expression after '{}' is redundant",
-                tok.loc, tok.value
-            ),
-            Eof => write!(f, "End of file"),
-        }
-    }
-}
-
-/** DisplayとErrorをエラー関連の方に実装 */
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "parser error")
-    }
-}
-
-// 標準ライブラリのErrorを実装(descriptionとcauseは使わず、sourceだけを実装)
-// Errorデータ型と名前が重複するのでStdErrorとして導入
-use std::error::Error as StdError;
-impl StdError for LexError {}
-impl StdError for ParseError {}
-impl StdError for Error {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        use self::Error::*;
-        match self {
-            Lexer(lex) => Some(lex),
-            Parser(parse) => Some(parse),
-        }
-    }
-}
-
-impl Error {
-      /// 診断メッセージを表示する
-    fn show_diagnostic(&self, input: &str) {
-        use self::Error::*;
-        use self::ParseError as P;
-        // エラー情報とその位置情報を取り出す
-        let (e, loc): (&dyn StdError, Loc) = match self {
-            Lexer(e) => (e, e.loc.clone()),
-            Parser(e) => {
-                let loc = match e {
-                    P::UnexpectedToken(Token { loc, .. })
-                    | P::NotExpression((Token { loc, .. }))
-                    | P::NotOperator((Token { loc, .. }))
-                    | P::UnclosedOpenParen((Token { loc, .. })) => loc.clone(),
-                    // redundant expressionはトークン移行行末までがあまりなのでlocの終了位置を調節
-                    P::RedundantExpression(Token { loc, .. }) => Loc(loc.0, input.len()),
-                    // Eofは位置情報を持っていないのでその場で作る
-                    P::Eof => Loc(input.len(), input.len() + 1),
-                };
-                (e, loc)
-            }
-        };
-        // エラー情報を表示
-        eprintln!("{}", e);
-        // エラー位置情報を強調して表示
-        print_annot(input, loc);
-    }
-}
-
-fn print_annot(input: &str, loc: Loc) {
-    // 入力に対して位置情報をわかりやすく示す
-    eprintln!("{}", input);
-    eprintln!("{}{}", " ".repeat(loc.0), "^".repeat(loc.1 - loc.0));
-}
-fn show_trace<E: StdError>(e: E) {
-    // エラーがあった場合、そのエラーとsourceを全て出力
-    eprintln!("{}",e);
-    let mut source = e.source();
-
-    // sourceを全て辿って表示
-    while let Some(e) = source {
-        eprintln!("caused by {}",e);
-        source = e.source()
-    }
-}
-
-use std::str::FromStr;
-// AstにFromStrを実装すると`str::parse`が使える
-impl FromStr for Ast {
-    type Err = Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // 字句解析 -> 構文解析の順に実行する
-        let tokens = lex(s)?;
-        let ast = parse(tokens)?;
-        Ok(ast)
-    }
-}
-
-use std::io;
-// プロンプトを表示しユーザーの入力を促す
-fn prompt(s: &str) -> io::Result<()> {
-    use std::io::{stdout, Write};
-
-    let stdout = stdout();
-    let mut stdout = stdout.lock();
-    stdout.write(s.as_bytes());
-    stdout.flush()
-}
-
-fn main() {
-    use std::io::{stdin, BufRead, BufReader};
-
-    let stdin = stdin();
-    let stdin = stdin.lock();
-    let stdin = BufReader::new(stdin);
-    let mut lines = stdin.lines();
-
-    loop {
-        prompt("> ").unwrap();
-        // 入力値の取得
-        if let Some(Ok(line)) = lines.next() {
-            let ast = match line.parse::<Ast>() {
-                Ok(ast) => ast,
-                Err(e) => {
-                    e.show_diagnostic(&line);
-                    show_trace(e);
-                    continue;
-                }
-            };
-            println!("{:?}", ast);
-        } else {
-            break;
-        }
-    }
 }
